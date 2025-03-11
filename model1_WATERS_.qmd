@@ -1,0 +1,187 @@
+---
+title: "MODEL 1"
+author: "LANDON WATERS"
+date: "03/10/2025"
+
+format: 
+  html:
+    theme: spacelab  
+    mainfont: verdana
+    highlight-style: github
+    title-block-banner: true
+    embed-resources: true
+---
+
+***Setup***
+
+```{r}
+# For reproducibility
+set.seed(505)
+
+sh <- suppressPackageStartupMessages
+sh(library(tidyverse))
+sh(library(caret))
+sh(library(class))
+sh(library(syuzhet)) # for get_sentiment()
+sh(library(tidytext))
+
+
+sh(library(text2vec))
+sh(library(umap))
+sh(library(cluster))
+
+data(stop_words)
+sh(library(thematic))
+theme_set(theme_bw())
+
+wine <- readRDS(gzcon(url("https://github.com/cd-public/D505/raw/master/dat/model.rds")))
+# Tidy and scale data set
+wine=wine%>%mutate(
+  province = as.factor(province),
+  price = scale(price),
+  points = scale(points),
+  year = scale(year)
+  )
+```
+
+***Feature Engineering***
+```{r}
+wine <- wine %>%
+  mutate(original_row_id = row_number())
+
+
+
+#Tokenize and Calculate TF-IDF
+tfidf <- wine %>%
+  unnest_tokens(word, description) %>%
+  count(original_row_id, word) %>%
+  bind_tf_idf(word, original_row_id, n)
+
+
+
+tfidf_wide <- tfidf %>%
+  pivot_wider(id_cols = original_row_id, names_from = word, values_from = tf_idf, values_fill = 0)
+
+
+wine <- wine %>%
+  left_join(tfidf_wide, by = "original_row_id")
+
+
+
+wine <- wine %>%
+  select(-original_row_id)
+
+colnames(wine)[which(names(wine) == "price.x")] <- "price"
+colnames(wine)[which(names(wine) == "points.x")] <- "points"
+colnames(wine)[which(names(wine) == "year.x")] <- "year"
+colnames(wine)[which(names(wine) == "description.x")] <- "description"
+
+
+
+
+```
+
+```{r}
+current_year = as.numeric(format(Sys.Date(), "%Y"))
+
+
+
+# New Features
+wino=wine%>%
+  # RUBY
+  group_by(province) %>%
+  mutate(provAvg = mean(points, na.rm = TRUE)) %>%
+  ungroup()%>%
+  mutate(
+    description = tolower(description),
+    tannins = ifelse(str_detect(description, "tannins"), 1,0), 
+    pricePoints = points / (price + 1e-6), # ensure no division by 0 
+    # LANDON
+    wine_age = current_year - year,
+    # Finds emotional tones from description:
+      # positive score -> positive sentiment
+      # negative score -> negative sentiment
+    sentiment = get_sentiment(description) 
+    )%>%
+  select(-description)
+
+# Scale numeric features
+wino$provAvg = scale(wino$provAvg)
+wino$pricePoints = scale(wino$pricePoints)
+wino$wine_age = scale(wino$wine_age)
+wino$sentiment = scale(wino$sentiment)
+
+
+
+wino
+
+```
+
+***Testing Different Kappas***
+
+```{r}
+control = trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+grid <- expand.grid(k = seq(3, 25, by = 2))  # Try different k values
+
+fit <- train(province ~ ., data = train, 
+             method = "knn",
+             trControl = control,
+             tuneGrid = grid)
+
+print(fit)
+```
+
+***Check***
+
+```{r}
+# Split the data
+wine_index <- createDataPartition(wino$province, p = 0.80, list = FALSE)
+train <- wino[ wine_index, ]
+test <- wino[-wine_index, ]
+
+# Train the model
+fit <- knn(
+  train = select(train,-province), 
+  test = select(test,-province), 
+  k=7, 
+  cl = train$province)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(fit, test$province)
+print(conf_matrix)
+```
+
+***Assessment Based on the Following Code***
+
+- .rds assessments will be evaluated as follows:
+  - With either method = "knn" or method = "naive_bayes"
+
+```{r}
+get_kappa<-function(df, col_name){
+  df <- na.omit(df)
+  
+  split <- createDataPartition(df[[col_name]], p = 0.8, list = FALSE)
+  train <- df[split, ]
+  test <- df[-split, ]
+  fit <- train(as.formula(paste(col_name, "~ .")), 
+               data = train, 
+               method = "knn", 
+               tuneLength = 15, 
+               metric = "Kappa", 
+               trControl = trainControl(method = "cv", number = 5)
+               )
+  confusionMatrix(predict(fit, test), test[[col_name]])$overall['Kappa']
+}
+
+get_kappa(wino, "province")
+
+write_rds(wino, file="group_n_knn.rds")
+
+
+
+#write_rds(wino, file="group_n_knn.rds")
+
+```
+
+
